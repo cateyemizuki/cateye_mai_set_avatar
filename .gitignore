@@ -1,0 +1,51 @@
+# ============================================================
+# MaiBot 插件仓库 .gitignore（模板合并：开发文档根目录模板 + 本插件原有规则）
+# 目的：保证流程文档（UPLOAD_AGENT.md / ISSUE_SUBMISSION.md）、
+#       运行期生成的配置与数据、Python 缓存不进入 git 仓库。
+# ============================================================
+
+# ---- 流程 / 指导文档（禁止进仓库）----
+UPLOAD_AGENT.md
+ISSUE_SUBMISSION.md
+
+# ---- 运行期生成的配置与数据（宿主会在插件目录生成）----
+/config.toml
+/config_back/
+/data/
+*.log
+
+# ---- 宿主安装回执与更新备份（发布安装模式写入，勿提交）----
+.maibot-release.json
+.update_backups/
+
+# ---- Python 缓存 / 构建产物 / 虚拟环境 ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- 测试 / 冒烟代码（发布内容不含测试，见 UPLOAD_AGENT.md §2.3）----
+test/
+tests/
+test_*.py
+*_test.py
+smoke_test*.py
+/tests/
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

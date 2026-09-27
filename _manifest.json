@@ -1,0 +1,62 @@
+{
+  "manifest_version": 2,
+  "id": "github.cateye.mai.set_avatar",
+  "version": "0.1.0",
+  "name": "麦麦要换头像",
+  "description": "让 bot 每天定时从头像库随机抽取一张更换 QQ 头像：支持触发时间随机漂移与跳过概率，提供 /msa add 命令收集头像、LLM 工具换头像（每日上限 + 冷却，不可用时自动隐藏工具）。需要安装 SnowLuma 或 NapCat 适配器之一（提供 set_qq_avatar 接口，无硬性插件依赖）。",
+  "author": {
+    "name": "cateye",
+    "url": "https://github.com/cateyemizuki"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/cateyemizuki/cateye_mai_set_avatar",
+    "homepage": "https://github.com/cateyemizuki/cateye_mai_set_avatar",
+    "documentation": "https://github.com/cateyemizuki/cateye_mai_set_avatar/blob/main/README.md",
+    "issues": "https://github.com/cateyemizuki/cateye_mai_set_avatar/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.5.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "Pillow",
+      "version_spec": ">=9.0.0"
+    },
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    }
+  ],
+  "plugin_type": "extension",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "image",
+      "fallback": "shuffle"
+    }
+  },
+  "capabilities": [
+    "send.text",
+    "message.get_by_id",
+    "api.call",
+    "api.get",
+    "component.enable",
+    "component.disable"
+  ],
+  "changelog": "CHANGELOG.md",
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN",
+      "en-US"
+    ]
+  }
+}
