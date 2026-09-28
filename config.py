@@ -9,12 +9,12 @@ WebUI 元数据约定（开发文档 §5.1「配置字段的 WebUI 元数据与�
 
 from __future__ import annotations
 
-from typing import ClassVar, Dict, Literal
+from typing import ClassVar, Dict, List, Literal
 
 from maibot_sdk import Field, PluginConfigBase
 
 # 与 _manifest.json 的 version 保持同步。
-SUPPORTED_CONFIG_VERSION = "0.1.0"
+SUPPORTED_CONFIG_VERSION = "1.0.0"
 
 # 图片不是 1 比 1 时的处理方式。
 SQUARE_MODE_CENTER_CROP = "居中切割"
@@ -60,13 +60,16 @@ class PluginSectionConfig(PluginConfigBase):
 
 
 class CoreSectionConfig(PluginConfigBase):
-    """头像处理方式与头像库路径。"""
+    """头像处理方式、管理员与更换提醒注入。"""
 
     __ui_label__ = "核心配置"
     __ui_icon__ = "tune"
     __ui_order__ = 1
     __ui_i18n__: ClassVar[Dict[str, Dict[str, str]]] = {
-        "en": {"title": "Core", "description": "Avatar square processing and library folders."}
+        "en": {
+            "title": "Core",
+            "description": "Avatar processing, admins and change-notice injection.",
+        }
     }
 
     square_mode: Literal[SQUARE_MODE_CENTER_CROP, SQUARE_MODE_STRETCH] = Field(
@@ -94,6 +97,64 @@ class CoreSectionConfig(PluginConfigBase):
                 "Extra avatar folder",
                 "Absolute path (both / and \\ accepted); leave empty to use the plugin data image folder only.",
             ),
+        },
+    )
+    admins: List[str] = Field(
+        default_factory=list,
+        description=(
+            "插件自管管理员列表（与宿主操作员名单合并后自动去重）。"
+            "支持 \"qq:123456789\"（平台前缀）或 \"123456789\"（纯 ID，匹配任意平台）；"
+            "user_id 区分大小写，纯数字 QQ 号不受影响"
+        ),
+        json_schema_extra={
+            "label": "插件管理员",
+            "input_type": "list",
+            "example": ["qq:123456789", "987654321"],
+            "hint": "宿主 plugin.permission / command_permissions 命中的操作员自动视为管理员；"
+            "此处可追加，指向同一人时自动去重",
+            **_ui_i18n(
+                "Plugin admins",
+                "Extra admins merged with host operators (deduplicated). "
+                'Format "qq:123456789" or bare "123456789".',
+            ),
+        },
+    )
+    change_notice_enabled: bool = Field(
+        default=True,
+        description="是否在更换头像后向模型上下文注入提醒（「你在 …… 更换了一次头像」）",
+        json_schema_extra={
+            "label": "启用更换提醒",
+            **_ui_i18n("Enable change notice"),
+        },
+    )
+    change_notice_hours: float = Field(
+        default=24.0,
+        ge=0.0,
+        description="提醒保留时长（小时）：距上次更换头像超过该时长后不再注入；0 表示不注入",
+        json_schema_extra={
+            "label": "提醒保留时长",
+            "step": 1.0,
+            "hint": "单位小时；每次更换头像会刷新计时；重启后保留，超时自动失效",
+            **_ui_i18n(
+                "Notice duration (hours)",
+                "Hours the notice stays injected after the last avatar change; 0 disables.",
+            ),
+        },
+    )
+    change_notice_to_planner: bool = Field(
+        default=True,
+        description="注入到 planner（在系统开头的 SystemMessageItem 后插入提醒条目）",
+        json_schema_extra={
+            "label": "注入 planner",
+            **_ui_i18n("Inject into planner"),
+        },
+    )
+    change_notice_to_replyer: bool = Field(
+        default=False,
+        description="注入到 replyer（追加到附加提示词）",
+        json_schema_extra={
+            "label": "注入 replyer",
+            **_ui_i18n("Inject into replyer"),
         },
     )
 
@@ -146,17 +207,17 @@ class DailySectionConfig(PluginConfigBase):
         },
     )
     skip_probability: float = Field(
-        default=0.5,
+        default=0.8,
         ge=0.0,
         le=1.0,
         description="跳过今天换头像的概率（0~1，每天到达触发时间时掷一次）",
         json_schema_extra={
             "label": "跳过概率",
             "step": 0.05,
-            "hint": "0~1；例如 0.5 表示约一半的天数当天不换",
+            "hint": "0~1；例如 0.8 表示约八成的天数当天不换",
             **_ui_i18n(
                 "Skip probability",
-                "0~1; e.g. 0.5 skips today's switch about half of the days.",
+                "0~1; e.g. 0.8 skips today's switch about 80% of the days.",
             ),
         },
     )
