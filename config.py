@@ -14,7 +14,7 @@ from typing import ClassVar, Dict, List, Literal
 from maibot_sdk import Field, PluginConfigBase
 
 # 与 _manifest.json 的 version 保持同步。
-SUPPORTED_CONFIG_VERSION = "1.0.0"
+SUPPORTED_CONFIG_VERSION = "1.0.2"
 
 # 图片不是 1 比 1 时的处理方式。
 SQUARE_MODE_CENTER_CROP = "居中切割"
@@ -207,17 +207,17 @@ class DailySectionConfig(PluginConfigBase):
         },
     )
     skip_probability: float = Field(
-        default=0.8,
+        default=0.5,
         ge=0.0,
         le=1.0,
         description="跳过今天换头像的概率（0~1，每天到达触发时间时掷一次）",
         json_schema_extra={
             "label": "跳过概率",
             "step": 0.05,
-            "hint": "0~1；例如 0.8 表示约八成的天数当天不换",
+            "hint": "0~1；例如 0.5 表示约一半的天数当天不换",
             **_ui_i18n(
                 "Skip probability",
-                "0~1; e.g. 0.8 skips today's switch about 80% of the days.",
+                "0~1; e.g. 0.5 skips today's switch about 50% of the days.",
             ),
         },
     )

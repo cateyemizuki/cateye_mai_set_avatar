@@ -10,8 +10,8 @@
 - /msa remove 序号：移除指定序号的头像（**管理员**）。
 - /msa add [名称]：引用一条含图片的消息，把图片加入头像库（**管理员**）。
 - /msa debug random：强制立即随机换一次头像（**管理员**）。
-- 管理员 = 宿主操作员名单（plugin.permission / command_permissions，本地控制台
-  天然放行）∪ 插件配置 core.admins，指向同一人自动去重（文档 §7.2 方式二）。
+- 管理员 = 宿主管理员（plugin.permission）∪ 插件配置 core.admins，按纯 ID 归一
+  去重（宿主读取失败降级为仅插件配置；本地控制台天然放行）。
 - 更换头像后按配置向 planner / replyer 注入提醒（「你在 …… 更换了一次头像」），
   保留时长可配置（默认 24 小时），持久化存储，超时自动失效。
 - LLM 工具 change_avatar：供 bot 主动换头像；每日上限 + 冷却，不可用时自动隐藏。
@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import aiohttp
 import yarl
@@ -66,6 +67,11 @@ from .schedule import (
     parse_trigger_time,
     roll_planned_datetime,
 )
+
+try:  # 管理员判定统一模块（复制自 cateye_common，随插件分发）
+    from .admin_util import collect_admins, plain_id
+except ImportError:  # 平铺目录加载时无包上下文
+    from admin_util import collect_admins, plain_id
 
 # 与 _manifest.json 的 id 一致；工具组件全名 = PLUGIN_ID.TOOL_NAME。
 PLUGIN_ID = "github.cateye.mai.set_avatar"
@@ -134,50 +140,13 @@ _MSA_USAGE = (
 )
 _MSA_DEBUG_USAGE = "未知的 debug 子命令，可用：/msa debug random（强制随机换一次头像）。"
 
-# 宿主侧管理员来源（bot_config.toml 的 global_config，点分割取嵌套键，文档 §5.3）：
-# - plugin.permission：跨平台操作员 "platform:user_id" 列表
-# - command_permissions.allow_users：命令放行用户列表
-# 与插件配置 core.admins 合并去重后共同构成管理员名单（文档 §7.2 方式二）。
-HOST_ADMIN_CONFIG_KEYS = ("plugin.permission", "command_permissions.allow_users")
-
 # 更换提醒的时间戳键（state.json，持久化，重启保留）。
 NOTICE_LAST_TS_KEY = "notice_last_ts"
 
 
-def _split_admin_entry(raw: object) -> tuple[str, str]:
-    """管理员条目 → (平台前缀(小写，可空), user_id)。兼容 "qq:123" 与 "123"。"""
-    text = str(raw or "").strip()
-    if ":" in text:
-        platform, _, ident = text.partition(":")
-        return platform.strip().lower(), ident.strip()
-    return "", text
-
-
-def build_admin_map(entries: object) -> dict[str, set[str]]:
-    """把管理员名单合并去重为 user_id → 平台集合。
-
-    平台集合中的空串 ``""`` 是哨兵，表示"任意平台"（纯 ID 条目）。指向同一人
-    （user_id 相同）的多条条目（宿主名单与插件配置、或不同平台前缀）自动去重
-    合并，取并集：带过纯 ID 条目后该用户在任意平台都算管理员。user_id 按宿主
-    规则区分大小写，仅平台前缀转小写。
-    """
-    admin_map: dict[str, set[str]] = {}
-    for raw in entries or ():
-        platform, ident = _split_admin_entry(raw)
-        if not ident:
-            continue
-        admin_map.setdefault(ident, set()).add(platform)
-    return admin_map
-
-
-def is_admin_in_map(admin_map: dict[str, set[str]], platform: str, user_id: str) -> bool:
-    """判断 (platform, user_id) 是否命中管理员名单。"""
-    platforms = admin_map.get(str(user_id or "").strip())
-    if not platforms:
-        return False
-    if "" in platforms:  # 纯 ID 条目：任意平台命中
-        return True
-    return str(platform or "").strip().lower() in platforms
+# CGNAT 网段：Python 3.12 的 ipaddress.is_private 不覆盖该段（与 cateye_common
+# url_guard 的黑名单口径一致），云主机/CGNAT 组网下单独拦截。
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -188,6 +157,7 @@ def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        or ip in _CGNAT_NETWORK
     )
 
 
@@ -258,8 +228,11 @@ def _is_forbidden_target(host: str) -> bool:
     return False
 
 
-def _validate_download_url(url: str) -> str:
-    """校验图片下载地址；不合法时抛 RuntimeError（异常文本不回显 HTTP 状态码）。"""
+async def _validate_download_url(url: str) -> str:
+    """校验图片下载地址；不合法时抛 RuntimeError（异常文本不回显 HTTP 状态码）。
+
+    DNS 解析是同步阻塞调用，移入 asyncio.to_thread 执行（不阻塞事件循环线程）。
+    """
     candidate = str(url or "").strip()
     if not candidate:
         raise RuntimeError("图片链接为空")
@@ -273,9 +246,37 @@ def _validate_download_url(url: str) -> str:
     host = parts.hostname or ""
     if not host:
         raise RuntimeError("图片链接缺少主机名")
-    if _is_forbidden_target(host):
+    if await asyncio.to_thread(_is_forbidden_target, host):
         raise RuntimeError("图片链接指向本机或内网地址，已拒绝下载")
     return candidate
+
+
+# 常见图片格式的文件头魔数（WEBP 为 RIFF 容器，单独判 8-12 字节）。
+_IMAGE_MAGIC_PREFIXES = (
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"\xff\xd8\xff",  # JPEG
+    b"GIF87a",  # GIF
+    b"GIF89a",  # GIF
+    b"BM",  # BMP
+)
+
+
+def _response_is_image(content_type: str, data: bytes) -> bool:
+    """下载响应的图片内容校验：Content-Type 须为 image/*。
+
+    Content-Type 缺失或为通用二进制类型（application/octet-stream）时按文件
+    魔数兜底嗅探；其余非 image/* 类型直接拒绝（减少无效下载）。
+    """
+    head = (data or b"")[:16]
+    if not head:
+        return False
+    if content_type.startswith("image/"):
+        return True
+    if content_type and content_type != "application/octet-stream":
+        return False
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True
+    return head.startswith(_IMAGE_MAGIC_PREFIXES)
 
 
 def _find_image_segment(node: Any) -> dict[str, Any] | None:
@@ -388,10 +389,12 @@ class SetAvatarPlugin(MaiBotPlugin):
         if scope != CONFIG_RELOAD_SCOPE_SELF:
             return
         self.ctx.logger.info("配置已热更新（version=%s）", version)
-        state = self._load_state()
-        daily = state.get("daily")
-        reshuffle = isinstance(daily, dict) and daily.get("date") == self._today_str() and not daily.get("result")
-        self._ensure_daily_plan(state, reshuffle=reshuffle)
+        # 与 _tick/工具路径共用状态锁：_ensure_daily_plan 可能写 state.json。
+        async with self._state_lock:
+            state = self._load_state()
+            daily = state.get("daily")
+            reshuffle = isinstance(daily, dict) and daily.get("date") == self._today_str() and not daily.get("result")
+            self._ensure_daily_plan(state, reshuffle=reshuffle)
         self._sync_scheduler()
         await self._refresh_tool_visibility()
 
@@ -425,18 +428,15 @@ class SetAvatarPlugin(MaiBotPlugin):
     async def _tick(self) -> None:
         if not self.config.plugin.enabled or not self.config.daily.enabled:
             return
-        state = self._load_state()
-        self._ensure_daily_plan(state)
-        daily = state.get("daily")
-        if not isinstance(daily, dict) or daily.get("result"):
-            return
-        if time.time() < float(daily.get("planned_ts") or 0):
-            return
+        # 全程持有状态锁（含 _ensure_daily_plan 的写路径），消除与工具/命令
+        # 路径并发读写 state.json 的丢更新窗口。
         async with self._state_lock:
-            # 锁内二次确认，避免与工具换头像并发打架。
             state = self._load_state()
-            daily = state.get("daily") if isinstance(state.get("daily"), dict) else {}
-            if daily.get("result") or time.time() < float(daily.get("planned_ts") or 0):
+            self._ensure_daily_plan(state)
+            daily = state.get("daily")
+            if not isinstance(daily, dict) or daily.get("result"):
+                return
+            if time.time() < float(daily.get("planned_ts") or 0):
                 return
             skip_probability = float(self.config.daily.skip_probability)
             if random.random() < skip_probability:
@@ -723,18 +723,25 @@ class SetAvatarPlugin(MaiBotPlugin):
             "/msa remove 序号 移除头像；/msa add [名称] 添加头像；/msa debug random 强制换头像"
         ),
         pattern=MSA_COMMAND_PATTERN,
-        # 鉴权走插件自管（文档 §7.2 方式二）：管理员 = 宿主操作员名单
-        # （plugin.permission / command_permissions.allow_users）∪ 配置 core.admins，
-        # 指向同一人自动去重；本地控制台（is_local_operator）天然放行。
+        # 鉴权走插件自管（文档 §7.2 方式二）：管理员 = 宿主管理员
+        # （plugin.permission）∪ 配置 core.admins，按纯 ID 归一去重；
+        # 本地控制台（is_local_operator）天然放行。
     )
     async def cmd_msa(self, **kwargs: Any) -> tuple[bool, str, bool]:
         stream_id = str(kwargs.get("stream_id") or "")
-        if not await self._is_admin(kwargs):
-            await self.ctx.send.text("权限不足：/msa 仅管理员可用。", stream_id)
-            return False, "msa permission denied", True
         groups = kwargs.get("matched_groups")
         groups = groups if isinstance(groups, dict) else {}
         sub = str(groups.get("sub") or "").strip().lower()
+
+        if not sub:
+            # 裸 msa（无子命令）：仅显示用法，不触发任何动作，也不要求管理员
+            # （帮助文案本身已注明各命令仅管理员可用）；带子命令时才走鉴权。
+            await self.ctx.send.text(_MSA_USAGE, stream_id)
+            return True, "msa usage", True
+
+        if not await self._is_admin(kwargs):
+            await self.ctx.send.text("权限不足：/msa 仅管理员可用。", stream_id)
+            return False, "msa permission denied", True
         arg = str(groups.get("arg") or "").strip()
 
         if sub == "debug":
@@ -818,33 +825,27 @@ class SetAvatarPlugin(MaiBotPlugin):
         await self.ctx.send.text(text, stream_id)
         return True, "added", True
 
-    # ==================== 管理员（宿主 ∪ 配置，自动去重） ====================
+    # ==================== 管理员（宿主 ∪ 配置，纯 ID 去重） ====================
 
     async def _is_admin(self, kwargs: dict[str, Any]) -> bool:
-        """命令鉴权：本地操作员 / 宿主名单 / 插件配置名单 任一命中即放行。"""
+        """命令鉴权：本地操作员天然放行；其余按纯 ID 比对管理员名单。"""
         if bool(kwargs.get("is_local_operator")):
             return True  # 本地控制台（bot_console 等）天然放行，与宿主规则一致
-        admin_map = await self._load_admin_map()
-        return is_admin_in_map(
-            admin_map,
-            str(kwargs.get("platform") or ""),
-            str(kwargs.get("user_id") or ""),
-        )
+        # 触发者 ID 归一为纯数字（'qq:10001' 与 '10001' 视为同一人）后比对。
+        return plain_id(str(kwargs.get("user_id") or "")) in await self._collect_admins()
 
-    async def _load_admin_map(self) -> dict[str, set[str]]:
-        """读取宿主操作员名单并合并插件配置 core.admins（指向同一人自动去重）。"""
-        entries: list[str] = list(self.config.core.admins or [])
-        for key in HOST_ADMIN_CONFIG_KEYS:
-            try:
-                raw = await self.ctx.config.get(key, [])
-            except Exception as exc:
-                self.ctx.logger.warning("读取宿主管理员配置 %s 失败：%s", key, exc)
-                continue
-            if isinstance(raw, (list, tuple)):
-                entries.extend(str(item) for item in raw)
-            elif raw:
-                entries.append(str(raw))
-        return build_admin_map(entries)
+    async def _collect_admins(self) -> list[str]:
+        """管理员名单 = 宿主 `plugin.permission` ∪ 插件配置 core.admins，按纯 ID 去重。
+
+        带平台前缀（'qq:10001'）与裸号（'10001'）视为同一人；宿主名单读取失败
+        时降级为仅插件配置（debug 日志，不抛异常）；名单为空时一律拒绝（fail-closed）。
+        """
+        try:
+            perms = await self.ctx.config.get("plugin.permission", None)
+        except Exception as exc:
+            self.ctx.logger.debug("读取宿主 plugin.permission 失败，降级为仅插件配置管理员：%s", exc)
+            perms = None
+        return collect_admins(perms, self.config.core.admins)
 
     # ==================== 更换提醒注入 ====================
 
@@ -869,10 +870,14 @@ class SetAvatarPlugin(MaiBotPlugin):
     def _inject_into_system_items(self, items: Any, text: str) -> list[Any] | None:
         """在系统开头的 SystemMessageItem 之后插入提醒条目，返回新条目列表。
 
-        宿主条目结构未在开发文档中完整公开，这里做防御式处理：仅以 system 条目
-        为模板复制结构、替换内容（不借用消息条目的类型，避免注入出错误类型的
-        条目）；找不到 system 条目时，在最前插入一个最小的 {"type": "system",
-        "content": text}。返回 None 表示无法注入。
+        宿主 1.2.x+ 的 planner 载荷是 ContextItem 快照投影（``item_type``/
+        ``meta``/``parts``），且宿主对 Hook 返回的 items 做**逐条强 schema
+        校验**：任一条目不合法（meta 缺失/非字典等）都会让**整份修改**被
+        静默丢弃并回退原文（v1.3.0 文档 §9.7.1）——连带同链其他插件的
+        注入一起失效。因此快照投影下必须构造结构完整的 SystemMessageItem
+        （meta 含唯一 item_id、继承的 logical_turn_id、ISO timestamp）；
+        旧 role/content 投影则构造 {"role": "system", "content": ...}。
+        找不到 system 条目时插到列表开头。返回 None 表示无法注入。
         """
         if not isinstance(items, list) or not items:
             return None
@@ -886,13 +891,25 @@ class SetAvatarPlugin(MaiBotPlugin):
                 template = item
                 insert_at = index + 1
                 break
-        if template is not None:
+        if template is not None and str(template.get("item_type") or ""):
+            # ContextItem 快照投影：构造带完整 meta 的合法条目。
+            # 此前实现是"复制模板后把所有键置 None"——meta 被置成 None，
+            # 在宿主强校验下整份 items 修改被静默丢弃（v1.0.2 修复）。
+            template_meta = template.get("meta")
+            meta_base = dict(template_meta) if isinstance(template_meta, dict) else {}
+            notice: dict[str, Any] = {
+                "item_type": str(template.get("item_type") or "SystemMessageItem"),
+                "meta": {
+                    **meta_base,
+                    "item_id": f"avatar-notice-{uuid4().hex}",
+                    "logical_turn_id": meta_base.get("logical_turn_id"),
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                },
+                "parts": [{"type": "text", "text": text}],
+            }
+        elif template is not None:
+            # 旧 role/content 投影：沿用模板的键结构，只替换内容
             notice = dict(template)
-            for key in list(notice):
-                notice[key] = None
-            for key in ("type", "item_type"):
-                if key in template:
-                    notice[key] = template[key]
             content_key = "text" if ("content" not in notice and "text" in notice) else "content"
             notice[content_key] = text
         else:
@@ -1021,6 +1038,24 @@ class SetAvatarPlugin(MaiBotPlugin):
             return True, "remove not found", True
         path = Path(str(entry.get("path") or ""))
         name = path.name
+        # 目录边界校验：注册表文件在数据目录下，若被手工/外部篡改，可能携带
+        # 头像库目录之外的路径。删除前解析真实路径并确认落在头像库目录内，
+        # 越界一律拒绝（防借管理员命令删除任意可写路径的文件）。
+        try:
+            resolved = path.resolve()
+            allowed_roots = [self._image_dir().resolve()]
+            extra_dir = self._extra_dir()
+            if extra_dir is not None:
+                allowed_roots.append(extra_dir.resolve())
+            inside = any(resolved.is_relative_to(root) for root in allowed_roots)
+        except OSError as exc:
+            await self.ctx.send.text("移除失败：头像路径无法定位，已拒绝删除", stream_id)
+            self.ctx.logger.warning("移除头像 %s 前解析路径失败：%s", path, exc)
+            return False, "remove path resolve failed", True
+        if not inside:
+            await self.ctx.send.text("移除失败：该头像不在头像库目录内，已拒绝删除", stream_id)
+            self.ctx.logger.warning("移除头像被拒绝：路径 %s 不在头像库目录内", path)
+            return False, "remove path outside library", True
         try:
             path.unlink()
         except FileNotFoundError:
@@ -1136,7 +1171,7 @@ class SetAvatarPlugin(MaiBotPlugin):
         失败原因只返回可读的中文说明，不回显 HTTP 状态码等远端细节。
         """
         timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_SECONDS)
-        target = _validate_download_url(url)
+        target = await _validate_download_url(url)
         async with aiohttp.ClientSession(
             timeout=timeout,
             headers={"User-Agent": DOWNLOAD_USER_AGENT},
@@ -1155,13 +1190,17 @@ class SetAvatarPlugin(MaiBotPlugin):
                             absolute = str(yarl.URL(target).join(yarl.URL(location)))
                         except (ValueError, TypeError) as exc:
                             raise RuntimeError("图片下载失败：重定向目标不合法") from exc
-                        target = _validate_download_url(absolute)
+                        target = await _validate_download_url(absolute)
                         continue
                     if resp.status != 200:
                         raise RuntimeError("图片下载失败：服务器未返回图片内容")
                     # 流式限量读取：进入内存的内容最多 MAX+1 字节，再做大小校验，
                     # 防止超大响应在 30s 超时窗口内吃满内存。
                     data = await resp.content.read(MAX_DOWNLOAD_BYTES + 1)
+                    # Content-Type 闸：须为 image/*；缺失或通用类型时按文件魔数兜底。
+                    content_type = str(resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if not _response_is_image(content_type, data):
+                        raise RuntimeError("图片下载失败：响应内容不是图片")
                     break
             else:
                 raise RuntimeError("图片下载失败：重定向次数过多")

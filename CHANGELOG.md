@@ -1,5 +1,34 @@
 # 更新日志
 
+## 1.0.2（2026-10-01）
+
+- **修复：更换提醒条目 `meta=None` 毒化整个 planner Hook 链**（2026-09-30 线上事故复盘）。
+  `_inject_into_system_items` 此前"复制 system 模板后把所有键置 None"，构造出的提醒条目
+  `meta` 为 `None`。宿主 1.3.x 起（v1.3.0 文档 §9.7.1）对 `maisaka.planner.before_request`
+  Hook 返回的 items 做**逐条强 schema 校验**，任一条目 `meta` 非字典即把**整份修改**静默丢弃、
+  回退原文——表现为本插件的提醒没注进去（小损失），但**同链其他插件的注入全部失效**
+  （实测：mai-love 屏幕旁白与【当前日期】/好感度、filter-assistant 的 assistant 剥离、
+  better-post-processing 的表情包含义描述、自主规划插件的日程注入同时消失，主进程日志
+  每轮请求报 `Hook maisaka.planner.before_request 返回的 items 无法反序列化，已忽略:
+  快照中的 item.meta 必须是字典`）。
+  现改为：快照投影下直接构造结构完整的 SystemMessageItem（meta 含唯一
+  `avatar-notice-*` item_id、继承 system 条目的 logical_turn_id、ISO timestamp，
+  parts 为文本段）；旧 role/content 投影与"找不到 system 模板"的行为保持不变。
+- 新增 `tests/test_notice_item.py` 7 项回归测试（meta 完整性、item_id 唯一、
+  不改动原列表、模板无 meta 时兜底、旧投影行为、非法入参返回 None）。
+
+## 1.0.1（2026-09-29）
+
+- **行为变更：跳过概率默认值改回 0.5**：1.0.0 曾调整为 0.8，本版与文档及发布说明口径对齐改回 **0.5**（约一半的天数当天不换）；已在配置中显式设置该项的用户不受影响。
+- **安全加固**：
+  - IP 黑名单补充 CGNAT 网段 `100.64.0.0/10`（Python 3.12 的 `ipaddress.is_private` 不覆盖该段），与出站护栏统一口径；
+  - `/msa remove` 删除文件前解析真实路径并校验落在头像库目录（数据目录 `image/` 或额外读取路径）之内，注册表文件被篡改时拒绝越界删除并记日志；
+  - 图片下载校验响应 Content-Type（须为 `image/*`；缺失或为 `application/octet-stream` 时按文件魔数嗅探兜底），非图片内容提前拒绝。
+- **异步化**：下载前目标地址的 DNS 校验移入 `asyncio.to_thread`，不再在事件循环线程内做同步 `getaddrinfo`。
+- **并发**：每日计划的读取与写入全程纳入状态锁（含配置热更新路径），消除与工具/命令路径并发写 `state.json` 的丢更新窗口。
+- **命令行为明确**：裸 `msa`（无子命令）对所有人仅显示用法、不触发任何动作（帮助文案已注明各命令仅管理员可用）；带子命令时才进行管理员鉴权。
+- **管理员判定统一（2026-09-29 二轮）**：管理员 = 宿主 `plugin.permission` ∪ 插件配置 `core.admins`，经统一模块（复制自 cateye_common 的 `admin_util.py`）按纯 ID 归一去重（带平台前缀与裸号视为同一人）；宿主名单读取失败降级为仅插件配置（debug 日志）；本地操作员放行与无管理员时的拒绝行为（fail-closed）保持不变。
+
 ## 1.0.0（2026-09-29）
 
 首个正式版，整合此前全部功能与本次更新。
